@@ -5,7 +5,7 @@
   "author": "JiuZ-Chn",
   "private": false,
   "main": "index.js",
-  "url": "https://github.com/JiuZ-Chn/Cursor-To-OpenAI",
+  "url": "https://github.com/BanQuyY/Cursor-To-OpenAI",
   "license": "MIT",
   "dependencies": {
     "dotenv": "^16.4.7",
