@@ -1,15 +1,69 @@
 const express = require('express');
-const morgan = require('morgan');
-const { v4: uuidv4 } = require('uuid');
-const { generateCursorBody, chunkToUtf8String, generateCursorChecksum } = require('./utils.js');
-const app = express();
+const router = express.Router();
 
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+const $root = require('../proto/message.js');
+const { v4: uuidv4, v5: uuidv5 } = require('uuid');
+const { generateCursorBody, chunkToUtf8String, generateHashed64Hex, generateCursorChecksum } = require('../utils/utils.js');
 
-app.use(morgan(process.env.MORGAN_FORMAT ?? 'tiny'));
+router.get("/models", async (req, res) => {
+  try{
+    let bearerToken = req.headers.authorization?.replace('Bearer ', '');
+    let authToken = bearerToken.split(',').map((key) => key.trim())[0];
+    if (authToken && authToken.includes('%3A%3A')) {
+      authToken = authToken.split('%3A%3A')[1];
+    }
+    else if (authToken && authToken.includes('::')) {
+      authToken = authToken.split('::')[1];
+    }
 
-app.post('/v1/chat/completions', async (req, res) => {
+    const checksum = req.headers['x-cursor-checksum'] 
+      ?? process.env['x-cursor-checksum'] 
+      ?? generateCursorChecksum(authToken.trim());
+    const cursorClientVersion = "0.45.11"
+
+    const availableModelsResponse = await fetch("https://api2.cursor.sh/aiserver.v1.AiService/AvailableModels", {
+      method: 'POST',
+      headers: {
+        'accept-encoding': 'gzip',
+        'authorization': `Bearer ${authToken}`,
+        'connect-protocol-version': '1',
+        'content-type': 'application/proto',
+        'user-agent': 'connect-es/1.6.1',
+        'x-cursor-checksum': checksum,
+        'x-cursor-client-version': cursorClientVersion,
+        'x-cursor-timezone': 'Asia/Shanghai',
+        'x-ghost-mode': 'true',
+        'Host': 'api2.cursor.sh',
+      },
+    })
+    const data = await availableModelsResponse.arrayBuffer();
+    const buffer = Buffer.from(data);
+    try{
+      const models = $root.AvailableModelsResponse.decode(buffer).models;
+
+      return res.json({
+        object: "list",
+        data: models.map(model => ({
+          id: model.name,
+          created: Date.now(),
+          object: 'model',
+          owned_by: 'cursor'
+        }))
+      })
+    } catch (error) {
+      const text = buffer.toString('utf-8');
+      throw new Error(text);      
+    }
+  }
+  catch (error) {
+    console.error(error);
+    return res.status(500).json({
+      error: 'Internal server error',
+    });
+  }
+})
+
+router.post('/chat/completions', async (req, res) => {
   // o1开头的模型，不支持流式输出
   if (req.body.model.startsWith('o1-') && req.body.stream) {
     return res.status(400).json({
@@ -28,7 +82,7 @@ app.post('/v1/chat/completions', async (req, res) => {
     if (authToken && authToken.includes('%3A%3A')) {
       authToken = authToken.split('%3A%3A')[1];
     }
-    if (authToken && authToken.includes('::')) {
+    else if (authToken && authToken.includes('::')) {
       authToken = authToken.split('::')[1];
     }
 
@@ -42,12 +96,12 @@ app.post('/v1/chat/completions', async (req, res) => {
       ?? process.env['x-cursor-checksum'] 
       ?? generateCursorChecksum(authToken.trim());
 
-    const sessionid = uuidv4()
-    const clientKey = '???'   // 256-bit hex value, not sure what's that
+    const sessionid = uuidv5(authToken,  uuidv5.DNS);
+    const clientKey = generateHashed64Hex(authToken)
+    const cursorClientVersion = "0.45.11"
 
-    // Request the CheckFeatureStatus before StreamChat. It may helps to bypass the account ban.
-    // If you remove the await here, it will improve performance, but I'm not sure if it will cause your account to be banned.
-    const checkFeatureStatusResponse = await fetch("https://api2.cursor.sh/aiserver.v1.AiService/CheckFeatureStatus", {
+    // Request the AvailableModels before StreamChat.
+    const availableModelsResponse = await fetch("https://api2.cursor.sh/aiserver.v1.AiService/AvailableModels", {
       method: 'POST',
       headers: {
         'accept-encoding': 'gzip',
@@ -55,16 +109,16 @@ app.post('/v1/chat/completions', async (req, res) => {
         'connect-protocol-version': '1',
         'content-type': 'application/proto',
         'user-agent': 'connect-es/1.6.1',
-        //'x-client-key': clientKey,
+        'x-amzn-trace-id': `Root=${uuidv4()}`,
+        'x-client-key': clientKey,
         'x-cursor-checksum': checksum,
-        'x-cursor-client-version': '0.45.9',
+        'x-cursor-client-version': cursorClientVersion,
         'x-cursor-timezone': 'Asia/Shanghai',
-        'x-ghost-mode': 'false',
-        'x-session-id': sessionid,
+        'x-ghost-mode': 'true',
+        "x-request-id": uuidv4(),
+        "x-session-id": sessionid,
         'Host': 'api2.cursor.sh',
       },
-      // 0x0A 0x1D cppExistingUserMarketingPopup
-      body: Buffer.from('0A1D6370704578697374696E67557365724D61726B6574696E67506F707570', 'hex')
     })
 
     const cursorBody = generateCursorBody(messages, model);
@@ -78,11 +132,11 @@ app.post('/v1/chat/completions', async (req, res) => {
         'content-type': 'application/connect+proto',
         'user-agent': 'connect-es/1.6.1',
         'x-amzn-trace-id': `Root=${uuidv4()}`,
-        //'x-client-key': clientKey,
+        'x-client-key': clientKey,
         'x-cursor-checksum': checksum,
-        'x-cursor-client-version': '0.45.9',
+        'x-cursor-client-version': cursorClientVersion,
         'x-cursor-timezone': 'Asia/Shanghai',
-        'x-ghost-mode': 'false',
+        'x-ghost-mode': 'true',
         'x-request-id': uuidv4(),
         'x-session-id': sessionid,
         'Host': 'api2.cursor.sh',
@@ -192,7 +246,4 @@ app.post('/v1/chat/completions', async (req, res) => {
   }
 });
 
-const PORT = process.env.PORT || 3010;
-app.listen(PORT, () => {
-  console.log(`The server listens port: ${PORT}`);
-});
+module.exports = router;
